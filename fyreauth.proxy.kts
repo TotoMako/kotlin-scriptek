@@ -167,15 +167,7 @@ class FyreSessionService : SessionService {
                     cl.name.endsWith(".class")
                 }
                 .map { cl ->
-                    try {
-                        val ctClass = transform(jar, cl)
-                        if (ctClass != null) {
-                            return@map Tuple.tuple(cl.realName, ctClass.getClassFile())
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                    null
+                    Tuple.tuple(cl.realName, transform(jar, cl).getClassFile())
                 }
                 .filter { cl -> cl != null }
                 .toList()
@@ -213,16 +205,9 @@ class FyreSessionService : SessionService {
         return JsonParser.parseString(Constants.PAYLOAD).toString()
     }
 
-    private fun transform(jar: JarFile, entry: JarEntry): CtClass? {
+    private fun transform(jar: JarFile, entry: JarEntry): CtClass {
         jar.getInputStream(entry).use { stream ->
             val ctClass = ClassPool.getDefault().makeClass(stream)
-
-            val method = try {
-                ctClass.getDeclaredMethod("joinServer2")
-            } catch (ex: Exception) {
-                return null
-            }
-
             val obj = JsonParser.parseString(Constants.PAYLOAD).asJsonObject
             val body = StringBuilder()
 
