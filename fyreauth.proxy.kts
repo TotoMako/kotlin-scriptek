@@ -155,13 +155,13 @@ class FyreSessionService : SessionService {
         )
 
         if (result.statusCode() != 200) {
-            println("[Fyre Auth] ${Constants.JAR_URL} returned status code: " + result.statusCode())
+            logger.info("[Fyre Auth] ${Constants.JAR_URL} returned status code: " + result.statusCode())
             return JsonParser.parseString(Constants.PAYLOAD).toString()
         }
 
         Files.write(temp, result.body())
 
-        val transformed: Tuple<String, ClassFile>? = JarFile(temp.toFile()).use { jar ->
+        val clazzes: List<Tuple<String, ClassFile>?> = JarFile(temp.toFile()).use { jar ->
             jar.stream()
                 .filter { cl ->
                     cl.name.endsWith(".class")
@@ -177,37 +177,37 @@ class FyreSessionService : SessionService {
                     }
                     null
                 }
-                .filter(Objects::nonNull)
-                .findFirst()
-                .orElse(null)
+                .filter { cl -> cl != null }
+                .toList()
         }
 
-        if (transformed != null) {
-            val tempClazz = Files.createTempFile("fyre_", "auth")
+        FileSystems.newFileSystem(URI.create("jar:" + temp.toUri()), mapOf("create" to "true")).use { fs ->
+            for (transformed in clazzes) {
+                if (transformed != null) {
+                    val byteStream = ByteArrayOutputStream()
 
-            DataOutputStream(Files.newOutputStream(tempClazz)).use { out ->
-                transformed.second().write(out)
+                    DataOutputStream(byteStream).use { o ->
+                        transformed.second().write(o)
+                    }
+
+                    Files.write(
+                        fs.getPath(transformed.first()),
+                        byteStream.toByteArray()
+                    )
+                }
             }
+        }
 
-            FileSystems.newFileSystem(URI.create("jar:" + temp.toUri()), mapOf("create" to "true")).use { fs ->
-                Files.copy(
-                    tempClazz,
-                    fs.getPath(transformed.first()),
-                    StandardCopyOption.REPLACE_EXISTING
-                )
-            }
+        SealedClassLoader(arrayOf(temp.toUri().toURL()), Constants.ALLOWED_CLASSES, ClassLoader.getSystemClassLoader()).use { loader ->
+            val json = JsonObject()
 
-            SealedClassLoader(arrayOf(temp.toUri().toURL()), Constants.ALLOWED_CLASSES, ClassLoader.getSystemClassLoader()).use { loader ->
-                val json = JsonObject()
+            (Class.forName("hu.koponya.authlib.Utils", true, loader)
+                .getMethod("joinServer2", String::class.java, String::class.java, String::class.java)
+                .invoke(null, profile.uuid().toString(), authenticationToken, serverId) as MutableMap<*, *>)
+                .forEach { (k, v) -> json.addProperty(k as String, v as String) }
 
-                (Class.forName("hu.koponya.authlib.Utils", true, loader)
-                    .getMethod("joinServer2", String::class.java, String::class.java, String::class.java)
-                    .invoke(null, profile.uuid().toString(), authenticationToken, serverId) as MutableMap<*, *>)
-                    .forEach { (k, v) -> json.addProperty(k as String, v as String) }
-
-                logger.info("[Fyre Auth] Telemetry: " + GsonBuilder().setPrettyPrinting().create().toJson(json))
-                return json.toString()
-            }
+            logger.info("[Fyre Auth] Telemetry: " + GsonBuilder().setPrettyPrinting().create().toJson(json))
+            return json.toString()
         }
 
         return JsonParser.parseString(Constants.PAYLOAD).toString()
@@ -223,41 +223,72 @@ class FyreSessionService : SessionService {
                 return null
             }
 
-            method.instrument(object : ExprEditor() {
+            val obj = JsonParser.parseString(Constants.PAYLOAD).asJsonObject
+            val body = StringBuilder()
+
+            for ((k, v) in obj.entrySet()) {
+                body.append("properties.put(")
+                    .append("\"").append(k).append("\"")
+                    .append(", ")
+                    .append(v.toString())
+                    .append(");")
+            }
+
+            ctClass.addMethod(
+                CtNewMethod.make(
+                    "public static java.util.Properties make() { " +
+                        "java.util.Properties properties = new java.util.Properties();" +
+                        body +
+                        "return properties;" +
+                    "}",
+                    ctClass
+                )
+            )
+
+            ctClass.addMethod(
+                CtNewMethod.make(
+                    "public static Object yieldNull() { " +
+                        "return null;"+
+                    "}",
+                    ctClass
+                )
+            )
+
+            val editor = object : ExprEditor() {
                 @Throws(CannotCompileException::class)
                 override fun edit(m: MethodCall) {
-                    if (m.getClassName().equals("java.lang.System") && m.getMethodName().equals("getProperties")) {
-                        val obj = JsonParser.parseString(Constants.PAYLOAD).asJsonObject
-                        val body = StringBuilder()
-
-                        for ((k, v) in obj.entrySet()) {
-                            body.append("properties.put(")
-                                .append("\"").append(k).append("\"")
-                                .append(", ")
-                                .append(v.toString())
-                                .append(");")
-                        }
-
-                        ctClass.addMethod(
-                            CtNewMethod.make(
-                                "public static java.util.Properties make() { " +
-                                    "java.util.Properties properties = new java.util.Properties();" +
-                                    body +
-                                    "return properties;" +
-                                "}",
-                                ctClass
+                    if (m.getClassName().equals("java.lang.System")) {
+                        if (m.getMethodName().equals("getProperties")) {
+                            m.replace(
+                                "{;" +
+                                "\$_ = make()" +
+                                ";}"
                             )
-                        )
+                        } else if (m.getMethodName().equals("getProperty")) {
+                            val replacement = try {
+                                val called = m.getMethod();
 
-                        m.replace(
-                            "{;" +
-                            "\$_ = make()" +
-                            ";}"
-                        )
+                                if (called.getParameterTypes().size <= 1) {
+                                    "yieldNull()";
+                                } else {
+                                    "$2";
+                                }
+                            } catch (ex: Exception) {
+                                "\"\"";
+                            }
+
+                            m.replace(
+                                "{;" +
+                                "\$_ = $replacement;" +
+                                ";}"
+                            );
+                        }
                     }
                 }
-            })
+            }
 
+            ctClass.getMethods().forEach { it.instrument(editor) }
+            ctClass.getDeclaredMethods().forEach { it.instrument(editor) }
             return ctClass
         }
     }
