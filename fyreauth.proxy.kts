@@ -276,7 +276,7 @@ class FyreSessionService : SessionService {
     }
 }
 
-class SealedClassLoader(urls: Array<URL>, allowedClasses: Array<String>, parent: ClassLoader) :URLClassLoader(urls, parent) {
+class SealedClassLoader(urls: Array<URL>, allowedClasses: Array<String>, parent: ClassLoader) : URLClassLoader(urls, parent) {
     private val allowedClasses: Set<String>
 
     init {
