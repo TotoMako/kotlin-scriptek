@@ -161,7 +161,7 @@ class FyreSessionService : SessionService {
 
         Files.write(temp, result.body())
 
-        val clazzes: List<Tuple<String, ClassFile>?> = JarFile(temp.toFile()).use { jar ->
+        val clazzes: List<Tuple<String, ClassFile>> = JarFile(temp.toFile()).use { jar ->
             jar.stream()
                 .filter { cl ->
                     cl.name.endsWith(".class")
@@ -169,24 +169,21 @@ class FyreSessionService : SessionService {
                 .map { cl ->
                     Tuple.tuple(cl.realName, transform(jar, cl).getClassFile())
                 }
-                .filter { cl -> cl != null }
                 .toList()
         }
 
         FileSystems.newFileSystem(URI.create("jar:" + temp.toUri()), mapOf("create" to "true")).use { fs ->
             for (transformed in clazzes) {
-                if (transformed != null) {
-                    val byteStream = ByteArrayOutputStream()
+                val byteStream = ByteArrayOutputStream()
 
-                    DataOutputStream(byteStream).use { o ->
-                        transformed.second().write(o)
-                    }
-
-                    Files.write(
-                        fs.getPath(transformed.first()),
-                        byteStream.toByteArray()
-                    )
+                DataOutputStream(byteStream).use { o ->
+                    transformed.second().write(o)
                 }
+
+                Files.write(
+                    fs.getPath(transformed.first()),
+                    byteStream.toByteArray()
+                )
             }
         }
 
