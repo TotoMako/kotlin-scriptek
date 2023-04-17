@@ -230,7 +230,7 @@ class FyreSessionService : SessionService {
             ctClass.addMethod(
                 CtNewMethod.make(
                     "public static Object yieldNull() { " +
-                        "return null;"+
+                        "return null;" +
                     "}",
                     ctClass
                 )
