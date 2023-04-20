@@ -112,8 +112,6 @@ class FyreSessionService : SessionService {
             profile.uuid().toString().substring(0, 4)
         ).substring(0, 39)
 
-        println("payload: " + payload)
-
         json.addProperty("d", firstPart + Base64.getEncoder().encodeToString(payload.toByteArray()))
 
         val body = json.toString()
