@@ -1,10 +1,6 @@
 import me.marvin.proxy.utils.*
 
 import com.google.gson.*
-import javassist.*;
-import javassist.bytecode.*;
-import javassist.expr.*;
-import javassist.expr.*;
 
 import java.awt.*
 import java.io.*
