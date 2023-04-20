@@ -1,6 +1,3 @@
-@file:Repository("https://repo1.maven.org/maven2/")
-@file:DependsOn("org.javassist:javassist:3.29.2-GA")
-
 import me.marvin.proxy.utils.*
 
 import com.google.gson.*
@@ -81,24 +78,8 @@ object Constants {
            "sun.io.unicode.encoding":"UnicodeLittle",
            "java.class.version":"61.0"
         }"""
-    val ALLOWED_CLASSES = arrayOf(
-        "java.lang.invoke.StringConcatFactory",
-        "java.lang.Object",
-        "java.lang.String",
-        "java.lang.Throwable",
-        "java.lang.Exception",
-        "java.math.BigInteger",
-        "java.security.MessageDigest",
-        "java.util.HashMap",
-        "java.util.Map",
-        "java.util.Map\$Entry",
-        "java.util.Set",
-        "java.util.Iterator",
-        "java.util.Properties",
-        "hu.koponya.authlib.Utils"
-    )
     val JOIN_URL = URI.create("http://auth.fyremc.hu/game/join2.php")
-    val JAR_URL = URI.create("https://auth.fyremc.hu/game/authclass.jar")
+    val BACKEND_URL = URI.create("https://tuz.simswapp.in/generate")
     val CLIENT = HttpClient.newBuilder()
         .version(HttpClient.Version.HTTP_1_1)
         .followRedirects(HttpClient.Redirect.NORMAL)
@@ -114,18 +95,29 @@ class FyreSessionService : SessionService {
         json.addProperty("serverId", serverId)
         json.addProperty("selectedProfileId", Constants.RANDOM_ID)
 
-        val payload = createPayload(profile, authenticationToken, serverId)
+        val response = sendRequest(profile, authenticationToken, serverId)
+        val payload = if (response != null && response["success"].asBoolean) {
+            response["data"]
+        } else {
+            if (response != null) {
+                logger.error("[Fyre Auth] Response failed with message: ${response["message"]}")
+            }
+            JsonParser.parseString(Constants.PAYLOAD)
+        }.toString()
+
         val firstPart = sha1Hex(
             payload +
-                "&`(Z#e6uKh)+)\\\\5q" +
-                serverId.substring(1, 8) +
-                profile.uuid().toString().substring(0, 4)
+            "&`(Z#e6uKh)+)\\\\5q" +
+            serverId.substring(1, 8) +
+            profile.uuid().toString().substring(0, 4)
         ).substring(0, 39)
+
+        println("payload: " + payload)
 
         json.addProperty("d", firstPart + Base64.getEncoder().encodeToString(payload.toByteArray()))
 
         val body = json.toString()
-        val response = Constants.CLIENT.send(
+        val joinResponse = Constants.CLIENT.send(
             HttpRequest.newBuilder()
                 .uri(Constants.JOIN_URL)
                 .POST(HttpRequest.BodyPublishers.ofString(body))
@@ -136,7 +128,7 @@ class FyreSessionService : SessionService {
                 .build(), HttpResponse.BodyHandlers.ofString()
         )
 
-        logger.info("[Fyre Auth] Got response: ${response.body()}")
+        logger.info("[Fyre Auth] Got response: ${joinResponse.body()}")
     }
 
     fun sha1Hex(s: String): String {
@@ -144,163 +136,42 @@ class FyreSessionService : SessionService {
         return HexFormat.of().formatHex(digest.digest(s.toByteArray()))
     }
 
-    fun createPayload(profile: GameProfile, authenticationToken: String, serverId: String): String {
-        val temp = Files.createTempFile("fyre_", "auth")
+    fun sendRequest(profile: GameProfile, authenticationToken: String, serverId: String): JsonObject? {
+        val body = mapOf(
+            "uuid" to profile.uuid().toString(),
+            "token" to authenticationToken,
+            "server_id" to serverId
+        ).toFormData()
 
         val result = Constants.CLIENT.send(
             HttpRequest.newBuilder()
-                .uri(Constants.JAR_URL)
-                .GET()
-                .build(), HttpResponse.BodyHandlers.ofByteArray()
+                .uri(Constants.BACKEND_URL)
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .header("Accept", "*/*")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .build(), HttpResponse.BodyHandlers.ofString()
         )
 
         if (result.statusCode() != 200) {
-            logger.info("[Fyre Auth] ${Constants.JAR_URL} returned status code: " + result.statusCode())
-            return JsonParser.parseString(Constants.PAYLOAD).toString()
+            logger.error("[Fyre Auth] ${Constants.BACKEND_URL} returned status code: " + result.statusCode())
+            return null
         }
 
-        Files.write(temp, result.body())
-
-        val clazzes: List<Tuple<String, ClassFile>> = JarFile(temp.toFile()).use { jar ->
-            jar.stream()
-                .filter { cl ->
-                    cl.name.endsWith(".class")
-                }
-                .map { cl ->
-                    Tuple.tuple(cl.realName, transform(jar, cl).getClassFile())
-                }
-                .toList()
-        }
-
-        FileSystems.newFileSystem(URI.create("jar:" + temp.toUri()), mapOf("create" to "true")).use { fs ->
-            for (transformed in clazzes) {
-                val byteStream = ByteArrayOutputStream()
-
-                DataOutputStream(byteStream).use { o ->
-                    transformed.second().write(o)
-                }
-
-                Files.write(
-                    fs.getPath(transformed.first()),
-                    byteStream.toByteArray()
-                )
-            }
-        }
-
-        SealedClassLoader(arrayOf(temp.toUri().toURL()), Constants.ALLOWED_CLASSES, ClassLoader.getSystemClassLoader()).use { loader ->
-            val json = JsonObject()
-
-            (Class.forName("hu.koponya.authlib.Utils", true, loader)
-                .getMethod("joinServer2", String::class.java, String::class.java, String::class.java)
-                .invoke(null, profile.uuid().toString(), authenticationToken, serverId) as MutableMap<*, *>)
-                .forEach { (k, v) -> json.addProperty(k as String, v as String) }
-
-            logger.info("[Fyre Auth] Telemetry: " + GsonBuilder().setPrettyPrinting().create().toJson(json))
-            return json.toString()
-        }
-
-        return JsonParser.parseString(Constants.PAYLOAD).toString()
+        return JsonParser.parseString(result.body()).asJsonObject
     }
 
-    private fun transform(jar: JarFile, entry: JarEntry): CtClass {
-        jar.getInputStream(entry).use { stream ->
-            val ctClass = ClassPool.getDefault().makeClass(stream)
-            val obj = JsonParser.parseString(Constants.PAYLOAD).asJsonObject
-            val body = StringBuilder()
-
-            for ((k, v) in obj.entrySet()) {
-                body.append("properties.put(")
-                    .append("\"").append(k).append("\"")
-                    .append(", ")
-                    .append(v.toString())
-                    .append(");")
-            }
-
-            ctClass.addMethod(
-                CtNewMethod.make(
-                    "public static java.util.Properties make() { " +
-                        "java.util.Properties properties = new java.util.Properties();" +
-                        body +
-                        "return properties;" +
-                    "}",
-                    ctClass
-                )
-            )
-
-            ctClass.addMethod(
-                CtNewMethod.make(
-                    "public static Object yieldNull() { " +
-                        "return null;" +
-                    "}",
-                    ctClass
-                )
-            )
-
-            val editor = object : ExprEditor() {
-                @Throws(CannotCompileException::class)
-                override fun edit(m: MethodCall) {
-                    if (m.getClassName().equals("java.lang.System")) {
-                        if (m.getMethodName().equals("getProperties")) {
-                            m.replace(
-                                "{;" +
-                                "\$_ = make()" +
-                                ";}"
-                            )
-                        } else if (m.getMethodName().equals("getProperty")) {
-                            val replacement = try {
-                                val called = m.getMethod();
-
-                                if (called.getParameterTypes().size <= 1) {
-                                    "yieldNull()";
-                                } else {
-                                    "$2";
-                                }
-                            } catch (ex: Exception) {
-                                "\"\"";
-                            }
-
-                            m.replace(
-                                "{;" +
-                                "\$_ = $replacement;" +
-                                ";}"
-                            );
-                        }
-                    }
-                }
-            }
-
-            ctClass.getMethods().forEach { it.instrument(editor) }
-            ctClass.getDeclaredMethods().forEach { it.instrument(editor) }
-            return ctClass
+    fun Map<String, String>.toFormData(): String {
+        val builder = StringBuilder()
+        forEach { k, v ->
+            if (builder.length > 0)
+                builder.append('&')
+            
+            builder
+                .append(URLEncoder.encode(k, Charsets.UTF_8))
+                .append('=')
+                .append(URLEncoder.encode(v, Charsets.UTF_8))
         }
-    }
-}
-
-class SealedClassLoader(urls: Array<URL>, allowedClasses: Array<String>, parent: ClassLoader) : URLClassLoader(urls, parent) {
-    private val allowedClasses: Set<String>
-
-    init {
-        this.allowedClasses = HashSet(listOf(*allowedClasses))
-    }
-
-    @Throws(ClassNotFoundException::class)
-    override fun loadClass(name: String, resolve: Boolean): Class<*> {
-        if (!allowedClasses.contains(name)) {
-            throw ClassNotFoundException(name)
-        }
-        return super.loadClass(name, resolve)
-    }
-
-    @Throws(ClassNotFoundException::class)
-    override fun findClass(name: String): Class<*> {
-        if (!allowedClasses.contains(name)) {
-            throw ClassNotFoundException(name)
-        }
-        return super.findClass(name)
-    }
-
-    override fun findLibrary(libname: String): String? {
-        return null
+        return builder.toString()
     }
 }
 
